@@ -1363,7 +1363,8 @@ const M2=menu;menu=function(sub,title){M2(sub,title);if(S.pause||S.tab!=='lobby'
  $('os').insertAdjacentHTML('beforeend','<br><button onclick="noGun()">一键空手进图</button> <small>开局附近有武器箱，更强的枪（M249/AWM/AA-12 等）只能在局内捡到；带出后永久解锁</small>')};
 applyLay();reset();sw(S.ld[0]);wbar();menu();
 </script>
-<script src="https://unpkg.com"></script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js
+"></script>
 <script>
 // ===== PeerJS 免服务器 P2P 联机补丁（适配 GitHub Pages） =====
 NET.kind = 'p2p';
