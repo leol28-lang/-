@@ -1363,5 +1363,195 @@ const M2=menu;menu=function(sub,title){M2(sub,title);if(S.pause||S.tab!=='lobby'
  $('os').insertAdjacentHTML('beforeend','<br><button onclick="noGun()">一键空手进图</button> <small>开局附近有武器箱，更强的枪（M249/AWM/AA-12 等）只能在局内捡到；带出后永久解锁</small>')};
 applyLay();reset();sw(S.ld[0]);wbar();menu();
 </script>
+<script src="https://unpkg.com"></script>
+<script>
+// ===== PeerJS 免服务器 P2P 联机补丁（适配 GitHub Pages） =====
+NET.kind = 'p2p';
+NET.tried = 1;
+function peerJoin(code) {
+  return new Promise((res, rej) => {
+    if (typeof Peer === 'undefined') return rej(new Error('PeerJS 网络库加载失败，请检查网络连接'));
+    const me = 'p_' + Math.random().toString(36).slice(2, 10);
+    const hostId = 'delta-3d-room-' + code;
+    const peers = new Map();
+    const conns = new Map();
+    const ev = {};
+    const pcb = new Set();
+    let myp = {};
+    let isHost = false;
+    let peer = null;
+
+    const list = () => [
+      { peer: me, isMe: true, sameTab: true, kind: 'viewer', presence: myp, updatedAt: Date.now() },
+      ...peers.values()
+    ];
+    const fire = () => {
+      const l = list();
+      pcb.forEach(f => f({ peers: l, joined: [], left: [], updated: [] }));
+    };
+
+    const handleMsg = (m, fromConn) => {
+      if (!m || typeof m !== 'object') return;
+      if (isHost && m.peer && m.peer !== me) {
+        // 房主负责转发消息给其他房客
+        conns.forEach((c, pid) => {
+          if (pid !== m.peer && c.open) c.send(m);
+        });
+      }
+      if (m.t === 'e') {
+        (ev[m.topic] || []).forEach(f => f({ topic: m.topic, data: m.data, peer: m.peer, isMe: m.peer === me, sameTab: m.peer === me, kind: 'viewer' }));
+      } else if (m.t === 'p') {
+        if (m.peer !== me) {
+          peers.set(m.peer, { peer: m.peer, isMe: false, sameTab: false, kind: 'viewer', presence: m.presence, updatedAt: Date.now() });
+          fire();
+        }
+      } else if (m.t === 'l') {
+        peers.delete(m.peer);
+        conns.delete(m.peer);
+        fire();
+      }
+    };
+
+    const bindConn = (conn) => {
+      let remoteId = null;
+      conn.on('open', () => {
+        conn.send({ t: 'p', peer: me, presence: myp });
+        if (isHost) {
+          peers.forEach((v, k) => conn.send({ t: 'p', peer: k, presence: v.presence }));
+        }
+      });
+      conn.on('data', (m) => {
+        if (m.peer && !remoteId) {
+          remoteId = m.peer;
+          conns.set(remoteId, conn);
+        }
+        handleMsg(m, conn);
+      });
+      conn.on('close', () => {
+        if (remoteId) {
+          peers.delete(remoteId);
+          conns.delete(remoteId);
+          if (isHost) {
+            conns.forEach(c => { if (c.open) c.send({ t: 'l', peer: remoteId }); });
+          }
+          fire();
+        }
+      });
+    };
+
+    const room = {
+      name: code,
+      emit: (t, d) => {
+        const msg = { t: 'e', topic: t, data: d, peer: me };
+        (ev[t] || []).forEach(f => f({ topic: t, data: d, peer: me, isMe: true, sameTab: true, kind: 'viewer' }));
+        conns.forEach(c => { if (c.open) c.send(msg); });
+        return Promise.resolve();
+      },
+      on: (t, f) => {
+        (ev[t] = ev[t] || new Set()).add(f);
+        return () => ev[t].delete(f);
+      },
+      presence: (p) => {
+        Object.assign(myp, p);
+        const msg = { t: 'p', peer: me, presence: myp };
+        conns.forEach(c => { if (c.open) c.send(msg); });
+        return Promise.resolve();
+      },
+      peers: list,
+      onPeers: (f) => { pcb.add(f); return () => pcb.delete(f); },
+      connected: () => !!(peer && !peer.destroyed),
+      onConnection: () => () => 0,
+      leave: () => {
+        try {
+          conns.forEach(c => { if (c.open) c.send({ t: 'l', peer: me }); });
+          if (peer) peer.destroy();
+        } catch (e) {}
+        return Promise.resolve();
+      }
+    };
+
+    // 尝试作为房主创建固定 ID 的房间；如果 ID 已被占用，则作为房客连接该房主
+    const hostPeerInst = new Peer(hostId);
+    let settled = false;
+
+    hostPeerInst.on('open', () => {
+      isHost = true;
+      peer = hostPeerInst;
+      peer.on('connection', bindConn);
+      if (!settled) { settled = true; res(room); }
+    });
+
+    hostPeerInst.on('error', (err) => {
+      if (err.type === 'unavailable-id') {
+        // 房间已存在，切换为房客模式连接房主
+        hostPeerInst.destroy();
+        const guestPeer = new Peer();
+        guestPeer.on('open', () => {
+          peer = guestPeer;
+          const conn = guestPeer.connect(hostId, { reliable: true });
+          bindConn(conn);
+          conn.on('open', () => {
+            if (!settled) { settled = true; res(room); }
+          });
+          conn.on('error', (e) => {
+            if (!settled) { settled = true; rej(new Error('连接房主失败')); }
+          });
+        });
+        guestPeer.on('error', (e) => {
+          if (!settled) { settled = true; rej(new Error('联机初始化失败: ' + e.type)); }
+        });
+      } else {
+        if (!settled) { settled = true; rej(new Error('联机服务连接异常: ' + err.type)); }
+      }
+    });
+  });
+}
+
+// 覆盖原有的 mpJoin 函数，使用 PeerJS 连接
+mpJoin = async function(code) {
+  code = (code || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12);
+  if (code.length < 4) return menu('<b style="color:var(--rd)">代码至少 4 位字母或数字</b>');
+  if (S.net) await mpLeave(1);
+  menu('正在连接 P2P 联机房间…');
+  try {
+    const rm = await peerJoin('dx-' + code);
+    const n = S.net = { code, rm, offs: [] };
+    n.offs.push(
+      rm.on('chat', m => { const d = m.data || {}; chatPush(String(d.n || '?').slice(0, 16), String(d.t || '').slice(0, 200)); }),
+      rm.on('hit', m => { const d = m.data || {}; if (d.to === myPeer()) applyHit(d); }),
+      rm.on('st', m => {
+        if (m.isMe) return;
+        const d = m.data || {};
+        if (state === 'menu' || state === 'end') {
+          S.map = +d.map || 0;
+          S.mode = +d.mode || 0;
+          S.pvp = !!d.pvp;
+          chatPush('系统', '房主开始了游戏，正在进入…', 1);
+          begin();
+        }
+      }),
+      rm.onPeers(() => { if ((state === 'menu' || state === 'end') && S.tab === 'mp') menu(); })
+    );
+    rm.presence({ n: S.nick, t: Date.now(), live: 0, cfg: { map: S.map, mode: S.mode, pvp: S.pvp } });
+    chatPush('系统', '已加入房间 ' + code.toUpperCase(), 1);
+    S.tab = 'mp';
+    menu();
+  } catch (e) {
+    S.net = null;
+    menu('<b style="color:var(--rd)">加入失败：' + esc(e.message || '未知错误') + '</b>');
+  }
+};
+
+// 更新联机提示文案
+const M20 = menu;
+menu = function(sub, title) {
+  M20(sub, title);
+  if (S.pause || S.tab !== 'mp') return;
+  const sm = $('os').querySelector('small');
+  if (sm && sm.textContent.includes('联机')) {
+    sm.textContent = '已启用 PeerJS 免服务器 P2P 直连联机（支持 GitHub Pages）';
+  }
+</script>
+</scrip
 </body>
 </html>
