@@ -1363,17 +1363,17 @@ const M2=menu;menu=function(sub,title){M2(sub,title);if(S.pause||S.tab!=='lobby'
  $('os').insertAdjacentHTML('beforeend','<br><button onclick="noGun()">一键空手进图</button> <small>开局附近有武器箱，更强的枪（M249/AWM/AA-12 等）只能在局内捡到；带出后永久解锁</small>')};
 applyLay();reset();sw(S.ld[0]);wbar();menu();
 </script>
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js
-"></script>
+<script src="https://jsdelivr.net"></script>
 <script>
-// ===== PeerJS 免服务器 P2P 联机补丁（适配 GitHub Pages） =====
+// ===== 多节点高可用 P2P 联机补丁 =====
 NET.kind = 'p2p';
 NET.tried = 1;
+
 function peerJoin(code) {
   return new Promise((res, rej) => {
-    if (typeof Peer === 'undefined') return rej(new Error('PeerJS 网络库加载失败，请检查网络连接'));
+    if (typeof Peer === 'undefined') return rej(new Error('网络库未加载，请刷新网页或检查网络'));
     const me = 'p_' + Math.random().toString(36).slice(2, 10);
-    const hostId = 'delta-3d-room-' + code;
+    const hostId = 'delta3d_v3_' + code;
     const peers = new Map();
     const conns = new Map();
     const ev = {};
@@ -1381,6 +1381,22 @@ function peerJoin(code) {
     let myp = {};
     let isHost = false;
     let peer = null;
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        try { if (peer) peer.destroy(); } catch (e) {}
+        rej(new Error('连接公共联机服务器超时（可能当前网络限制了 P2P 端口，可尝试切换 Wi-Fi/手机热点）'));
+      }
+    }, 12000);
+
+    const done = (ok, val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ok ? res(val) : rej(val);
+    };
 
     const list = () => [
       { peer: me, isMe: true, sameTab: true, kind: 'viewer', presence: myp, updatedAt: Date.now() },
@@ -1391,13 +1407,10 @@ function peerJoin(code) {
       pcb.forEach(f => f({ peers: l, joined: [], left: [], updated: [] }));
     };
 
-    const handleMsg = (m, fromConn) => {
+    const handleMsg = (m) => {
       if (!m || typeof m !== 'object') return;
       if (isHost && m.peer && m.peer !== me) {
-        // 房主负责转发消息给其他房客
-        conns.forEach((c, pid) => {
-          if (pid !== m.peer && c.open) c.send(m);
-        });
+        conns.forEach((c, pid) => { if (pid !== m.peer && c.open) c.send(m); });
       }
       if (m.t === 'e') {
         (ev[m.topic] || []).forEach(f => f({ topic: m.topic, data: m.data, peer: m.peer, isMe: m.peer === me, sameTab: m.peer === me, kind: 'viewer' }));
@@ -1426,15 +1439,13 @@ function peerJoin(code) {
           remoteId = m.peer;
           conns.set(remoteId, conn);
         }
-        handleMsg(m, conn);
+        handleMsg(m);
       });
       conn.on('close', () => {
         if (remoteId) {
           peers.delete(remoteId);
           conns.delete(remoteId);
-          if (isHost) {
-            conns.forEach(c => { if (c.open) c.send({ t: 'l', peer: remoteId }); });
-          }
+          if (isHost) conns.forEach(c => { if (c.open) c.send({ t: 'l', peer: remoteId }); });
           fire();
         }
       });
@@ -1471,49 +1482,49 @@ function peerJoin(code) {
       }
     };
 
-    // 尝试作为房主创建固定 ID 的房间；如果 ID 已被占用，则作为房客连接该房主
-    const hostPeerInst = new Peer(hostId);
-    let settled = false;
+    const cfg = {
+      debug: 0,
+      config: {
+        iceServers: [
+          { urls: 'stun:://google.com' },
+          { urls: 'stun:://google.com' },
+          { urls: 'stun:://cloudflare.com' }
+        ]
+      }
+    };
 
-    hostPeerInst.on('open', () => {
+    const hostInst = new Peer(hostId, cfg);
+    hostInst.on('open', () => {
       isHost = true;
-      peer = hostPeerInst;
+      peer = hostInst;
       peer.on('connection', bindConn);
-      if (!settled) { settled = true; res(room); }
+      done(true, room);
     });
 
-    hostPeerInst.on('error', (err) => {
+    hostInst.on('error', (err) => {
       if (err.type === 'unavailable-id') {
-        // 房间已存在，切换为房客模式连接房主
-        hostPeerInst.destroy();
-        const guestPeer = new Peer();
-        guestPeer.on('open', () => {
-          peer = guestPeer;
-          const conn = guestPeer.connect(hostId, { reliable: true });
+        try { hostInst.destroy(); } catch (e) {}
+        const guestInst = new Peer(cfg);
+        guestInst.on('open', () => {
+          peer = guestInst;
+          const conn = guestInst.connect(hostId, { reliable: true });
           bindConn(conn);
-          conn.on('open', () => {
-            if (!settled) { settled = true; res(room); }
-          });
-          conn.on('error', (e) => {
-            if (!settled) { settled = true; rej(new Error('连接房主失败')); }
-          });
+          conn.on('open', () => done(true, room));
+          conn.on('error', () => done(false, new Error('无法连上房主，请确认房主未锁屏或退出网页')));
         });
-        guestPeer.on('error', (e) => {
-          if (!settled) { settled = true; rej(new Error('联机初始化失败: ' + e.type)); }
-        });
+        guestInst.on('error', (e) => done(false, new Error('联机初始化失败: ' + e.type)));
       } else {
-        if (!settled) { settled = true; rej(new Error('联机服务连接异常: ' + err.type)); }
+        done(false, new Error('联机节点错误: ' + err.type));
       }
     });
   });
 }
 
-// 覆盖原有的 mpJoin 函数，使用 PeerJS 连接
 mpJoin = async function(code) {
   code = (code || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12);
   if (code.length < 4) return menu('<b style="color:var(--rd)">代码至少 4 位字母或数字</b>');
   if (S.net) await mpLeave(1);
-  menu('正在连接 P2P 联机房间…');
+  menu('正在连接联机节点，请稍候（最多 10 秒）…');
   try {
     const rm = await peerJoin('dx-' + code);
     const n = S.net = { code, rm, offs: [] };
@@ -1539,19 +1550,11 @@ mpJoin = async function(code) {
     menu();
   } catch (e) {
     S.net = null;
-    menu('<b style="color:var(--rd)">加入失败：' + esc(e.message || '未知错误') + '</b>');
+    menu('<b style="color:var(--rd)">' + esc(e.message || '连接失败') + '</b>');
   }
 };
+</script>
 
-// 更新联机提示文案
-const M20 = menu;
-menu = function(sub, title) {
-  M20(sub, title);
-  if (S.pause || S.tab !== 'mp') return;
-  const sm = $('os').querySelector('small');
-  if (sm && sm.textContent.includes('联机')) {
-    sm.textContent = '已启用 PeerJS 免服务器 P2P 直连联机（支持 GitHub Pages）';
-  }
 </script>
 </body>
 </html>
